@@ -18,17 +18,5 @@ __pycache__
 
 # Replicate
 /model_cache/*
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.webp
-*.heic
-*.heif
-*.hevc
-*.h264
-*.mp4
-*.mov
-*.avi
-*.mkv
-*.flv
+*.wav
+*.mp3

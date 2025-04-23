@@ -1,147 +1,60 @@
-# Cog Template Repository
+# Dia: Run realistic text-to-dialogue audio generation locally
 
-This is a template repository for creating [Cog](https://github.com/replicate/cog) models that efficiently handle model weights with proper caching. It includes tools to upload model weights to Google Cloud Storage and generate download code for your `predict.py` file.
+[![Run on Replicate](https://replicate.com/zsxkib/dia/badge)](https://replicate.com/zsxkib/dia)
+[![Built with Cog](https://github.com/replicate/cog/raw/main/docs/header.png)](https://github.com/replicate/cog)
 
-[![Cog](https://github.com/replicate/cog/raw/main/docs/header.png)](https://github.com/replicate/cog)
+This repository provides a [Cog](https://github.com/replicate/cog) container for **Dia**, a 1.6 billion parameter text-to-speech model developed by Nari Labs. Dia generates highly realistic dialogue audio directly from text, including multiple speakers and non-verbal sounds like `(laughs)`.
 
-## Getting Started
+**Model Links:**
+*   Original Model: [nari-labs/Dia-1.6B on Hugging Face](https://huggingface.co/nari-labs/Dia-1.6B)
+*   Original Code: [github.com/nari-labs/dia](https://github.com/nari-labs/dia)
+*   This Cog packaging by: [zsxkib on GitHub](https://github.com/zsxkib) / [@zsakib_ on Twitter](https://twitter.com/zsakib_)
 
-To use this template for your own model:
+## Prerequisites
 
-1. Clone this repository
-2. Modify `predict.py` with your model's implementation
-3. Update `cog.yaml` with your model's dependencies
-4. Use `cache_manager.py` to upload and manage model weights
+*   **Docker**: To build and run the container. [Install Docker](https://docs.docker.com/get-docker/).
+*   **Cog**: To build and run this model locally. [Install Cog](https://github.com/replicate/cog#install).
+*   **NVIDIA GPU**: An NVIDIA GPU is required to run this model.
 
-## Repository Structure
+## Run locally with Cog
 
-- `predict.py`: The main model implementation file 
-- `cache_manager.py`: Script for uploading model weights to GCS and generating download code
-- `cog.yaml`: Cog configuration file that defines your model's environment
+Running this model locally is straightforward with Cog. It handles building the environment and downloading the model weights automatically.
 
-## Managing Model Weights with cache_manager.py
+1.  **Clone this repository:**
+    ```bash
+    git clone https://github.com/zsxkib/cog-dia.git
+    cd cog-dia
+    ```
 
-A key feature of this template is the `cache_manager.py` script, which helps you:
+2.  **Run a prediction:**
+    The first time you run `cog predict`, it builds the container and downloads the weights, which takes a few minutes. Subsequent runs are much faster.
 
-1. Upload model weights to Google Cloud Storage (GCS)
-2. Generate code for downloading those weights in your `predict.py`
-3. Handle both individual files and directories efficiently
+    ```bash
+    # Example prediction
+    cog predict -i text="[S1] This is a test using Cog! [S2] It downloads the weights automatically. (laughs)"
+    ```
 
-### Prerequisites for Using cache_manager.py
+    Cog will output the path to the generated `.wav` file.
 
-- Google Cloud SDK installed and configured (`gcloud` command)
-- Permission to upload to the specified GCS bucket (default: `gs://replicate-weights/`)
-- `tar` command available in your PATH
+    **You can pass other inputs too:**
+    ```bash
+    cog predict \
+        -i text="[S1] Another example! [S2] With different settings." \
+        -i cfg_scale=3.5 \
+        -i temperature=1.1
+    ```
+    Check `predict.py` for all available inputs like `audio_prompt`, `seed`, etc.
 
-### Basic Usage
+## How it works (briefly)
 
-```bash
-python cache_manager.py --model-name your-model-name --local-dirs model_cache
-```
-
-This will:
-1. Find files and directories in the `model_cache` directory
-2. Create tar archives of each directory
-3. Upload both individual files and tar archives to GCS
-4. Generate code snippets for downloading the weights in your `predict.py`
-
-### Advanced Usage
-
-```bash
-python cache_manager.py \
-    --model-name your-model-name \
-    --local-dirs model_cache weights \
-    --gcs-base-path gs://replicate-weights/ \
-    --cdn-base-url https://weights.replicate.delivery/default/ \
-    --keep-tars
-```
-
-#### Parameters
-
-- `--model-name`: Required. The name of your model (used in paths)
-- `--local-dirs`: Required. One or more local directories to process
-- `--gcs-base-path`: Optional. Base Google Cloud Storage path
-- `--cdn-base-url`: Optional. Base CDN URL
-- `--keep-tars`: Optional. Keep the generated .tar files locally after upload
-
-## Workflow Example
-
-1. **Develop your model locally**:
-   ```bash
-   # Run your model once to download weights to model_cache
-   cog predict -i prompt="test"
-   ```
-
-2. **Upload model weights**:
-   ```bash
-   python cache_manager.py --model-name your-model-name --local-dirs model_cache
-   ```
-
-3. **Copy the generated code snippet** into your `predict.py`
-
-4. **Test that the model can download weights**:
-   ```bash
-   rm -rf model_cache
-   cog predict -i prompt="test"
-   ```
-
-## Example Implementation
-
-The template comes with a sample Stable Diffusion implementation in `predict.py` that demonstrates:
-
-- Setting up the model cache directory
-- Downloading weights from GCS with progress reporting
-- Setting environment variables for model caching
-- Random seed generation for reproducibility
-- Output format and quality options
-
-## Best Practices
-
-- **Environment Variables**: Set cache-related environment variables early
-  ```python
-  os.environ["HF_HOME"] = MODEL_CACHE
-  os.environ["TORCH_HOME"] = MODEL_CACHE
-  # etc.
-  ```
-
-- **Seed Management**: Provide a seed parameter and implement random seed generation
-  ```python
-  if seed is None:
-      seed = int.from_bytes(os.urandom(2), "big")
-  print(f"Using seed: {seed}")
-  ```
-
-- **Output Formats**: Support multiple output formats (webp, jpg, png) with quality controls
-  ```python
-  output_format: str = Input(
-      description="Format of the output image",
-      choices=["webp", "jpg", "png"],
-      default="webp"
-  )
-  output_quality: int = Input(
-      description="The image compression quality...",
-      ge=1, le=100, default=80
-  )
-  ```
-
-## Deploying to Replicate
-
-After setting up your model, you can push it to [Replicate](https://replicate.com):
-
-1. Create a new model on Replicate
-2. Push your model:
-   ```bash
-   cog push r8.im/username/model-name
-   ```
+Cog uses `cog.yaml` to define the environment and `predict.py` to run the model. The `setup()` function in `predict.py` automatically downloads the model weights from a Replicate CDN using `pget` if they aren't already cached locally within the container.
 
 ## License
 
-MIT
+The original Dia model is licensed under Apache 2.0. This Cog packaging code is MIT licensed. Please respect the original model's usage restrictions.
 
 ---
 
-[![Replicate](https://replicate.com/account/model-name/badge)](https://replicate.com/account/model-name) 
+⭐ Star this repo on [GitHub](https://github.com/zsxkib/cog-dia)!
 
-⭐ Star the repo on [GitHub](https://github.com/username/repo-name)!
-
-👋 Follow me on [Twitter/X](https://twitter.com/username)
+👋 Follow me on [Twitter/X](https://x.com/zsakib_)

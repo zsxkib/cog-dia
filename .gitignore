@@ -173,17 +173,16 @@ cython_debug/
 # Replicate
 .cog
 /model_cache/*
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.webp
-*.heic
-*.heif
-*.hevc
-*.h264
-*.mp4
-*.mov
-*.avi
-*.mkv
-*.flv
+*.wav
+*.mp3
+
+# Virtual environments
+.gradio
+
+**/*.pth
+**/*.mp3
+!example_prompt.mp3
+
+.ruff_cache
+.ipynb_checkpoints
+config.json

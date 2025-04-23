@@ -1,27 +1,31 @@
 # Prediction interface for Cog ⚙️
-# https://cog.run/python
+# https://github.com/nari-labs/dia
 
 import os
+import subprocess
 
 MODEL_CACHE = "model_cache"
-BASE_URL = "https://weights.replicate.delivery/default/test-sd-15/model_cache/"
+BASE_URL = f"https://weights.replicate.delivery/default/dia/{MODEL_CACHE}/"
 os.environ["HF_HOME"] = MODEL_CACHE
 os.environ["TORCH_HOME"] = MODEL_CACHE
 os.environ["HF_DATASETS_CACHE"] = MODEL_CACHE
 os.environ["TRANSFORMERS_CACHE"] = MODEL_CACHE
 os.environ["HUGGINGFACE_HUB_CACHE"] = MODEL_CACHE
 
-import mimetypes
-
-mimetypes.add_type("image/webp", ".webp")
-
 import time
 import torch
-import subprocess
-from typing import Optional
+import numpy as np
+import soundfile as sf
+import tempfile
+import shutil
 from cog import BasePredictor, Input, Path
-from diffusers import StableDiffusionPipeline
+from typing import Optional
+import random
 
+# Import Dia model
+from dia.model import Dia
+
+OUTPUT_SAMPLE_RATE = 44100 # Dia model output sample rate
 
 def download_weights(url: str, dest: str) -> None:
     start = time.time()
@@ -40,16 +44,37 @@ def download_weights(url: str, dest: str) -> None:
         raise
     print("[+] Download completed in: ", time.time() - start, "seconds")
 
+def set_seed(seed: int):
+    """Sets the random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    # Ensure deterministic behavior for cuDNN (if used)
+    # Not strictly necessary for this model but good practice
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
+    print(f"Random seed set to {seed}")
 
 class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
+        print("Setting up predictor...")
+        start_time = time.time()
+
         # Create model cache directory if it doesn't exist
         if not os.path.exists(MODEL_CACHE):
             os.makedirs(MODEL_CACHE)
 
+        # Determine device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}")
+
+        # Download model weights
         model_files = [
-            "models--sd-legacy--stable-diffusion-v1-5.tar",
+            "models--nari-labs--Dia-1.6B.tar",
         ]
 
         for model_file in model_files:
@@ -59,78 +84,132 @@ class Predictor(BasePredictor):
             if not os.path.exists(dest_path.replace(".tar", "")):
                 download_weights(url, dest_path)
 
-        # Load the model
-        model_id = "sd-legacy/stable-diffusion-v1-5"
-        self.pipe = StableDiffusionPipeline.from_pretrained(
-            model_id, torch_dtype=torch.float16, cache_dir=MODEL_CACHE
-        )
-        self.pipe = self.pipe.to("cuda")
+        # Load Dia model
+        print("Loading Dia model...")
+        self.model = Dia.from_pretrained("nari-labs/Dia-1.6B", device=self.device)
+        
+        end_time = time.time()
+        print(f"Setup complete in {end_time - start_time:.2f} seconds.")
 
     def predict(
         self,
-        prompt: str = Input(description="Text prompt for image generation"),
-        num_inference_steps: int = Input(
-            description="Number of denoising steps", ge=1, le=100, default=50
+        text: str = Input(description="Input text for dialogue generation. Use [S1], [S2] to indicate different speakers and (description) in parentheses for non-verbal cues e.g., (laughs), (whispers)."),
+        audio_prompt: Optional[Path] = Input(description="Optional audio file (.wav/.mp3/.flac) for voice cloning. The model will attempt to mimic this voice style.", default=None),
+        max_new_tokens: int = Input(
+            description="Controls the length of generated audio. Higher values create longer audio. (86 tokens ≈ 1 second of audio).",
+            default=3072,
+            ge=500,
+            le=4096
         ),
-        guidance_scale: float = Input(
-            description="Guidance scale for text conditioning",
+        cfg_scale: float = Input(
+            description="Controls how closely the audio follows your text. Higher values (3-5) follow text more strictly; lower values may sound more natural but deviate more.",
+            default=3.0,
             ge=1.0,
-            le=20.0,
-            default=7.5,
+            le=5.0
+        ),
+        temperature: float = Input(
+            description="Controls randomness in generation. Higher values (1.3-2.0) increase variety; lower values (0.1-0.9) make output more consistent and predictable.",
+            default=1.3,
+            ge=0.1,
+            le=2.0
+        ),
+        top_p: float = Input(
+            description="Controls diversity of word choice. Higher values include more unusual options. Most users shouldn't need to adjust this parameter.",
+            default=0.95,
+            ge=0.1,
+            le=1.0
+        ),
+        cfg_filter_top_k: int = Input(
+            description="Technical parameter for filtering audio generation tokens. Higher values allow more diverse sounds; lower values create more consistent audio.",
+            default=35,
+            ge=10,
+            le=100
+        ),
+        speed_factor: float = Input(
+            description="Adjusts playback speed of the generated audio. Values below 1.0 slow down the audio; 1.0 is original speed.",
+            default=0.94,
+            ge=0.5,
+            le=1.5
         ),
         seed: Optional[int] = Input(
-            description="Random seed for reproducible results. Leave blank for a random seed.",
-            default=None,
-        ),
-        output_format: str = Input(
-            description="Format of the output image",
-            choices=["webp", "jpg", "png"],
-            default="webp",
-        ),
-        output_quality: int = Input(
-            description="The image compression quality (for lossy formats like JPEG and WebP). 100 = best quality, 0 = lowest quality.",
-            ge=1,
-            le=100,
-            default=80,
+            description="Random seed for reproducible results. Use the same seed value to get the same output for identical inputs. Leave blank for random results each time.",
+            default=None
         ),
     ) -> Path:
-        """Generate an image from a text prompt"""
-        # Set up generator with seed if provided
+        """Generate dialogue audio from text, optionally cloning voice from an audio prompt."""
+        # Set random seed
         if seed is None:
             seed = int.from_bytes(os.urandom(2), "big")
-        print(f"Using seed: {seed}")
+        set_seed(seed)
 
-        # Generate image
-        image = self.pipe(
-            prompt=prompt,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            seed=seed,
-        ).images[0]
+        # Validate text input
+        if not text or text.isspace():
+            raise ValueError("Text input cannot be empty.")
 
-        # Ensure image is in RGB mode
-        if image.mode != "RGB":
-            image = image.convert("RGB")
+        # Handle audio prompt if provided
+        temp_audio_prompt_path = None
+        if audio_prompt is not None:
+            # Simple check for audio file extension
+            if not str(audio_prompt).lower().endswith((".wav", ".mp3", ".flac", ".ogg", ".opus")):
+                print(f"Warning: Audio prompt file extension doesn't look like audio: {audio_prompt}. Trying anyway.")
+            
+            # Copy audio prompt to temporary file
+            suffix = os.path.splitext(str(audio_prompt))[1]
+            temp_audio_prompt_path = tempfile.NamedTemporaryFile(suffix=suffix, delete=False).name
+            shutil.copyfile(str(audio_prompt), temp_audio_prompt_path)
+            print(f"Using audio prompt: {temp_audio_prompt_path}")
 
-        # Prepare saving arguments
-        extension = output_format.lower()
-        save_params = {}
+        # Generate audio
+        print("Generating audio tokens...")
+        start_time = time.time()
+        with torch.inference_mode():
+            output_audio_np = self.model.generate(
+                text=text,
+                audio_prompt_path=temp_audio_prompt_path,
+                max_tokens=max_new_tokens,
+                cfg_scale=cfg_scale,
+                temperature=temperature,
+                top_p=top_p,
+                use_cfg_filter=True,
+                cfg_filter_top_k=cfg_filter_top_k,
+                use_torch_compile=False,
+            )
+        gen_end_time = time.time()
+        print(f"Token generation finished in {gen_end_time - start_time:.2f} seconds.")
 
-        # Add quality parameter for lossy formats
-        if output_format != "png":
-            print(f"[~] Output quality: {output_quality}")
-            save_params["quality"] = output_quality
-            save_params["optimize"] = True
+        # Clean up temporary audio prompt file if used
+        if temp_audio_prompt_path and os.path.exists(temp_audio_prompt_path):
+            os.unlink(temp_audio_prompt_path)
 
-        # Handle jpg/jpeg naming
-        if extension == "jpg":
-            extension = "jpeg"
+        # Validate output
+        if output_audio_np is None or output_audio_np.size == 0:
+            raise RuntimeError("Model generation failed to produce audio.")
 
-        # Create output path
-        output_path = Path(f"output.{extension}")
+        print(f"Generated audio shape: {output_audio_np.shape}")
 
-        # Save the image with appropriate parameters
-        image.save(str(output_path), **save_params)
-        print(f"[+] Saved output as {output_format.upper()}")
+        # Adjust speed
+        original_len = len(output_audio_np)
+        speed_factor = max(0.1, min(speed_factor, 5.0))  # Clamp speed factor
+        target_len = int(original_len / speed_factor)
+
+        if target_len != original_len and target_len > 0:
+            print(f"Adjusting speed by factor {speed_factor:.2f}...")
+            x_original = np.arange(original_len)
+            x_resampled = np.linspace(0, original_len - 1, target_len)
+            resampled_audio_np = np.interp(x_resampled, x_original, output_audio_np)
+            final_audio_np = resampled_audio_np.astype(np.float32)
+            print(f"Resampled audio from {original_len} to {target_len} samples.")
+        else:
+            final_audio_np = output_audio_np  # Keep original if no change or invalid calc
+            print(f"Skipping audio speed adjustment (factor: {speed_factor:.2f}).")
+
+        # Save output
+        output_path = Path(tempfile.mkdtemp()) / "output.wav"
+        print(f"Saving audio to {output_path}...")
+        sf.write(str(output_path), final_audio_np, OUTPUT_SAMPLE_RATE, subtype='FLOAT')
+
+        save_end_time = time.time()
+        print(f"Audio saved in {save_end_time - gen_end_time:.2f} seconds.")
+        print(f"Total prediction time: {save_end_time - start_time:.2f} seconds.")
 
         return output_path

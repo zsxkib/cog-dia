@@ -4,11 +4,12 @@
 build:
   # set to true if your model requires a GPU
   gpu: true
+  cuda: "12.1"  # Specify CUDA version compatible with torch==2.6.0+cu126
 
   # a list of ubuntu apt packages to install
   system_packages:
-    - "libgl1-mesa-glx"
-    - "libglib2.0-0"
+    - "libsndfile1" # For soundfile
+    - "ffmpeg" # For audio processing (often needed by audio libs)
 
   # python version in the form '3.11' or '3.11.4'
   python_version: "3.11"
