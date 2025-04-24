@@ -1,7 +1,6 @@
 # Dia: Run realistic text-to-dialogue audio generation locally
 
 [![Run on Replicate](https://replicate.com/zsxkib/dia/badge)](https://replicate.com/zsxkib/dia)
-[![Built with Cog](https://github.com/replicate/cog/raw/main/docs/header.png)](https://github.com/replicate/cog)
 
 This repository provides a [Cog](https://github.com/replicate/cog) container for **Dia**, a 1.6 billion parameter text-to-speech model developed by Nari Labs. Dia generates highly realistic dialogue audio directly from text, including multiple speakers and non-verbal sounds like `(laughs)`.
 
