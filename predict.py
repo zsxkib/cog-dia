@@ -100,6 +100,12 @@ class Predictor(BasePredictor):
             ge=500,
             le=4096
         ),
+        max_audio_prompt_seconds: int = Input(
+            description="Maximum duration in seconds for the input voice cloning audio prompt. Only used when an audio prompt is provided. Longer voice samples will be truncated to this length.",
+            default=10,
+            ge=1,
+            le=120
+        ),
         cfg_scale: float = Input(
             description="Controls how closely the audio follows your text. Higher values (3-5) follow text more strictly; lower values may sound more natural but deviate more.",
             default=3.0,
@@ -155,11 +161,10 @@ class Predictor(BasePredictor):
             audio_data, sr = sf.read(str(audio_prompt), dtype='float32')
             print(f"Loaded audio prompt with shape: {audio_data.shape}, sample rate: {sr}")
 
-            # --- NEW: Truncate audio prompt to first 10 seconds ---
-            max_prompt_seconds = 10
-            max_prompt_samples = int(max_prompt_seconds * sr)
+            # Truncate audio prompt to max_audio_prompt_seconds
+            max_prompt_samples = int(max_audio_prompt_seconds * sr)
             if audio_data.shape[0] > max_prompt_samples:
-                print(f"Audio prompt is longer than {max_prompt_seconds}s, truncating to {max_prompt_samples} samples.")
+                print(f"Audio prompt is longer than {max_audio_prompt_seconds}s, truncating to {max_prompt_samples} samples.")
                 audio_data = audio_data[:max_prompt_samples]
                 print(f"Truncated audio prompt shape: {audio_data.shape}")
             # --- End Truncation ---
