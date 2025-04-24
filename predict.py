@@ -17,7 +17,6 @@ import torch
 import numpy as np
 import soundfile as sf
 import tempfile
-import shutil
 from cog import BasePredictor, Input, Path
 from typing import Optional
 import random
@@ -108,9 +107,9 @@ class Predictor(BasePredictor):
             le=5.0
         ),
         temperature: float = Input(
-            description="Controls randomness in generation. Higher values (1.3-2.0) increase variety; lower values (0.1-0.9) make output more consistent and predictable.",
+            description="Controls randomness in generation. Higher values (1.3-2.0) increase variety; lower values make output more consistent. Set to 0 for deterministic (greedy) generation.",
             default=1.3,
-            ge=0.1,
+            ge=0.0,
             le=2.0
         ),
         top_p: float = Input(
@@ -149,15 +148,42 @@ class Predictor(BasePredictor):
         # Handle audio prompt if provided
         temp_audio_prompt_path = None
         if audio_prompt is not None:
-            # Simple check for audio file extension
             if not str(audio_prompt).lower().endswith((".wav", ".mp3", ".flac", ".ogg", ".opus")):
                 print(f"Warning: Audio prompt file extension doesn't look like audio: {audio_prompt}. Trying anyway.")
             
-            # Copy audio prompt to temporary file
-            suffix = os.path.splitext(str(audio_prompt))[1]
-            temp_audio_prompt_path = tempfile.NamedTemporaryFile(suffix=suffix, delete=False).name
-            shutil.copyfile(str(audio_prompt), temp_audio_prompt_path)
-            print(f"Using audio prompt: {temp_audio_prompt_path}")
+            # Load audio and process to mono float32
+            audio_data, sr = sf.read(str(audio_prompt), dtype='float32')
+            print(f"Loaded audio prompt with shape: {audio_data.shape}, sample rate: {sr}")
+
+            # --- NEW: Truncate audio prompt to first 10 seconds ---
+            max_prompt_seconds = 10
+            max_prompt_samples = int(max_prompt_seconds * sr)
+            if audio_data.shape[0] > max_prompt_samples:
+                print(f"Audio prompt is longer than {max_prompt_seconds}s, truncating to {max_prompt_samples} samples.")
+                audio_data = audio_data[:max_prompt_samples]
+                print(f"Truncated audio prompt shape: {audio_data.shape}")
+            # --- End Truncation ---
+
+            # Ensure mono
+            if audio_data.ndim > 1:
+                if audio_data.shape[1] == 2: # Shape (N, 2)
+                    print("Audio prompt is stereo, converting to mono by averaging channels.")
+                    audio_data = np.mean(audio_data, axis=1)
+                elif audio_data.shape[0] == 2: # Shape (2, N) - less common but handle anyway
+                        print("Audio prompt is stereo (2, N), converting to mono by averaging channels.")
+                        audio_data = np.mean(audio_data, axis=0)
+                else:
+                        print(f"Warning: Audio prompt has unexpected shape {audio_data.shape}. Attempting to use the first channel.")
+                        # Fallback: take the first channel if shape is unusual
+                        audio_data = audio_data[:, 0] if audio_data.shape[1] < audio_data.shape[0] else audio_data[0]
+
+            # Ensure contiguous array after potential slicing/averaging
+            audio_data = np.ascontiguousarray(audio_data)
+
+            # Save processed audio to temporary WAV file
+            temp_audio_prompt_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+            sf.write(temp_audio_prompt_path, audio_data, sr, subtype='FLOAT')
+            print(f"Processed audio prompt saved to temporary file: {temp_audio_prompt_path}")
 
         # Generate audio
         print("Generating audio tokens...")
