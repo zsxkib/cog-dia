@@ -12,7 +12,7 @@ build:
     - "ffmpeg" # For audio processing (often needed by audio libs)
 
   # python version in the form '3.11' or '3.11.4'
-  python_version: "3.11"
+  python_version: "3.10"
 
   # path to a Python requirements.txt file
   python_requirements: requirements.txt

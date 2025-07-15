@@ -51,10 +51,9 @@ def set_seed(seed: int):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-    # Ensure deterministic behavior for cuDNN (if used)
-    # Not strictly necessary for this model but good practice
-    # torch.backends.cudnn.deterministic = True
-    # torch.backends.cudnn.benchmark = False
+    # Ensure deterministic behavior for cuDNN
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     print(f"Random seed set to {seed}")
 
 class Predictor(BasePredictor):
@@ -64,16 +63,15 @@ class Predictor(BasePredictor):
         start_time = time.time()
 
         # Create model cache directory if it doesn't exist
-        if not os.path.exists(MODEL_CACHE):
-            os.makedirs(MODEL_CACHE)
+        os.makedirs(MODEL_CACHE, exist_ok=True)
 
         # Determine device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
 
-        # Download model weights
+        # Download model weights - commented out to allow fresh download of updated model
         model_files = [
-            "models--nari-labs--Dia-1.6B.tar",
+            "models--nari-labs--Dia-1.6B-0626.tar",
         ]
 
         for model_file in model_files:
@@ -85,7 +83,15 @@ class Predictor(BasePredictor):
 
         # Load Dia model
         print("Loading Dia model...")
-        self.model = Dia.from_pretrained("nari-labs/Dia-1.6B", device=self.device)
+        # Determine compute_dtype based on device
+        dtype_map = {
+            "cpu": "float32",
+            "mps": "float32",  # Apple M series – better with float32
+            "cuda": "float16",  # NVIDIA – better with float16
+        }
+        dtype = dtype_map.get(self.device.type, "float16")
+        print(f"Using device: {self.device}, loading model with {dtype}")
+        self.model = Dia.from_pretrained("nari-labs/Dia-1.6B-0626", compute_dtype=dtype, device=self.device)
         
         end_time = time.time()
         print(f"Setup complete in {end_time - start_time:.2f} seconds.")
@@ -94,6 +100,7 @@ class Predictor(BasePredictor):
         self,
         text: str = Input(description="Input text for dialogue generation. Use [S1], [S2] to indicate different speakers and (description) in parentheses for non-verbal cues e.g., (laughs), (whispers)."),
         audio_prompt: Optional[Path] = Input(description="Optional audio file (.wav/.mp3/.flac) for voice cloning. The model will attempt to mimic this voice style.", default=None),
+        audio_prompt_text: Optional[str] = Input(description="Optional transcript of the audio prompt. If provided, this will be prepended to the main text input.", default=None),
         max_new_tokens: int = Input(
             description="Controls the length of generated audio. Higher values create longer audio. (86 tokens ≈ 1 second of audio).",
             default=3072,
@@ -114,9 +121,9 @@ class Predictor(BasePredictor):
         ),
         temperature: float = Input(
             description="Controls randomness in generation. Higher values (1.3-2.0) increase variety; lower values make output more consistent. Set to 0 for deterministic (greedy) generation.",
-            default=1.3,
-            ge=0.0,
-            le=2.0
+            default=1.8,
+            ge=1.0,
+            le=2.5
         ),
         top_p: float = Input(
             description="Controls diversity of word choice. Higher values include more unusual options. Most users shouldn't need to adjust this parameter.",
@@ -126,13 +133,13 @@ class Predictor(BasePredictor):
         ),
         cfg_filter_top_k: int = Input(
             description="Technical parameter for filtering audio generation tokens. Higher values allow more diverse sounds; lower values create more consistent audio.",
-            default=35,
+            default=45,
             ge=10,
             le=100
         ),
         speed_factor: float = Input(
             description="Adjusts playback speed of the generated audio. Values below 1.0 slow down the audio; 1.0 is original speed.",
-            default=0.94,
+            default=1.0,
             ge=0.5,
             le=1.5
         ),
@@ -143,10 +150,21 @@ class Predictor(BasePredictor):
     ) -> Path:
         """Generate dialogue audio from text, optionally cloning voice from an audio prompt."""
         # Set random seed
-        if seed is None:
-            seed = int.from_bytes(os.urandom(2), "big")
+        if seed is None or seed < 0:
+            seed = random.randint(0, 2**32 - 1)
+            print(f"No seed provided, generated random seed: {seed}")
+        else:
+            print(f"Using user-selected seed: {seed}")
         set_seed(seed)
 
+        # Handle audio prompt text if provided
+        if audio_prompt is not None and audio_prompt_text and not audio_prompt_text.isspace():
+            text = audio_prompt_text + "\n" + text
+            text = text.strip()
+        
+        if audio_prompt is not None and (not audio_prompt_text or audio_prompt_text.isspace()):
+            raise ValueError("Audio Prompt Text input cannot be empty when using audio prompt.")
+        
         # Validate text input
         if not text or text.isspace():
             raise ValueError("Text input cannot be empty.")
@@ -160,50 +178,54 @@ class Predictor(BasePredictor):
             # Load audio and process to mono float32
             audio_data, sr = sf.read(str(audio_prompt), dtype='float32')
             print(f"Loaded audio prompt with shape: {audio_data.shape}, sample rate: {sr}")
+            
+            # Check if audio_data is valid
+            if audio_data is None or audio_data.size == 0 or audio_data.max() == 0:
+                print("Warning: Audio prompt seems empty or silent, ignoring prompt.")
+                audio_prompt = None
+                temp_audio_prompt_path = None
+            else:
+                # Truncate audio prompt to max_audio_prompt_seconds
+                max_prompt_samples = int(max_audio_prompt_seconds * sr)
+                if audio_data.shape[0] > max_prompt_samples:
+                    print(f"Audio prompt is longer than {max_audio_prompt_seconds}s, truncating to {max_prompt_samples} samples.")
+                    audio_data = audio_data[:max_prompt_samples]
+                    print(f"Truncated audio prompt shape: {audio_data.shape}")
 
-            # Truncate audio prompt to max_audio_prompt_seconds
-            max_prompt_samples = int(max_audio_prompt_seconds * sr)
-            if audio_data.shape[0] > max_prompt_samples:
-                print(f"Audio prompt is longer than {max_audio_prompt_seconds}s, truncating to {max_prompt_samples} samples.")
-                audio_data = audio_data[:max_prompt_samples]
-                print(f"Truncated audio prompt shape: {audio_data.shape}")
-            # --- End Truncation ---
-
-            # Ensure mono
-            if audio_data.ndim > 1:
-                if audio_data.shape[1] == 2: # Shape (N, 2)
-                    print("Audio prompt is stereo, converting to mono by averaging channels.")
-                    audio_data = np.mean(audio_data, axis=1)
-                elif audio_data.shape[0] == 2: # Shape (2, N) - less common but handle anyway
+                # Ensure mono
+                if audio_data.ndim > 1:
+                    if audio_data.shape[0] == 2:  # Assume (2, N)
                         print("Audio prompt is stereo (2, N), converting to mono by averaging channels.")
                         audio_data = np.mean(audio_data, axis=0)
-                else:
+                    elif audio_data.shape[1] == 2:  # Assume (N, 2)
+                        print("Audio prompt is stereo (N, 2), converting to mono by averaging channels.")
+                        audio_data = np.mean(audio_data, axis=1)
+                    else:
                         print(f"Warning: Audio prompt has unexpected shape {audio_data.shape}. Attempting to use the first channel.")
                         # Fallback: take the first channel if shape is unusual
-                        audio_data = audio_data[:, 0] if audio_data.shape[1] < audio_data.shape[0] else audio_data[0]
+                        audio_data = audio_data[0] if audio_data.shape[0] < audio_data.shape[1] else audio_data[:, 0]
+                    # Ensure contiguous array after potential slicing/averaging
+                    audio_data = np.ascontiguousarray(audio_data)
 
-            # Ensure contiguous array after potential slicing/averaging
-            audio_data = np.ascontiguousarray(audio_data)
-
-            # Save processed audio to temporary WAV file
-            temp_audio_prompt_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-            sf.write(temp_audio_prompt_path, audio_data, sr, subtype='FLOAT')
-            print(f"Processed audio prompt saved to temporary file: {temp_audio_prompt_path}")
+                # Save processed audio to temporary WAV file
+                temp_audio_prompt_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+                sf.write(temp_audio_prompt_path, audio_data, sr, subtype='FLOAT')
+                print(f"Processed audio prompt saved to temporary file: {temp_audio_prompt_path}")
 
         # Generate audio
         print("Generating audio tokens...")
         start_time = time.time()
         with torch.inference_mode():
             output_audio_np = self.model.generate(
-                text=text,
-                audio_prompt_path=temp_audio_prompt_path,
+                text,
+                audio_prompt=temp_audio_prompt_path,
                 max_tokens=max_new_tokens,
                 cfg_scale=cfg_scale,
                 temperature=temperature,
                 top_p=top_p,
-                use_cfg_filter=True,
                 cfg_filter_top_k=cfg_filter_top_k,
                 use_torch_compile=False,
+                verbose=True,
             )
         gen_end_time = time.time()
         print(f"Token generation finished in {gen_end_time - start_time:.2f} seconds.")
